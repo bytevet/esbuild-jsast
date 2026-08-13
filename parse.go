@@ -51,6 +51,10 @@ func (f *File) NameOf(r Ref) string {
 	return f.symbols[r.InnerIndex].OriginalName
 }
 
+// Inspect walks every node in the file in depth-first order. See Inspect for
+// the traversal's contract.
+func (f *File) Inspect(fn func(Node) bool) { Inspect(f.Stmts, fn) }
+
 // Error is a parse diagnostic. Line is 1-based; Column is a 0-based BYTE offset
 // within the line, matching esbuild's own convention.
 type Error struct {

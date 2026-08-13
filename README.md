@@ -20,6 +20,28 @@ for _, s := range f.Stmts {
 The re-exports are type **aliases**, so `*jsast.EDot` *is* `*js_ast.EDot` and type switches
 written against this package work on nodes the parser produced.
 
+## Walking the tree
+
+`Inspect` visits every statement, expression and binding in depth-first pre-order. Returning
+`false` prunes that node's children.
+
+```go
+f.Inspect(func(n jsast.Node) bool {
+    call, ok := n.Data.(*jsast.ECall)
+    if !ok {
+        return true
+    }
+    if dot, ok := call.Target.Data.(*jsast.EDot); ok && dot.Name == "exec" {
+        report(n.Loc) // n.Loc is the byte offset of the call
+    }
+    return true
+})
+```
+
+`Node` pairs a node kind with the `Loc` of the wrapper it was reached through, since `Loc` lives
+on `Stmt`/`Expr`/`Binding` rather than on the kind itself. Fields following esbuild's `OrNil`
+convention are skipped when empty, so `n.Data` is never nil.
+
 ## Why Options is two booleans
 
 `js_parser` is a *transforming* parser. `MinifySyntax` inlines constants and deletes dead
@@ -55,6 +77,18 @@ friends are fields a consumer reaches straight off `Stmts`.
 Two small lists in the generator carry the judgment calls that reachability can't make —
 `neverExport` for renamer state that sits beside `Symbol` without being part of it, and
 `alwaysExport` for names published before the seam was derived. Both are commented with why.
+
+`walk.go` is generated the same way, by `tools/gen-walk.go`: a field is traversed when its type
+can carry a `Stmt`, `Expr` or `Binding` — directly, through a slice or pointer, or through an
+intermediate struct like `Decl` or `Property`. Hand-writing that is a bad bet, because a missed
+field makes the walker skip a subtree silently, and upstream adds fields monthly.
+
+The walker is checked against an independent oracle rather than against expectations. A
+reflection walk in `walk_test.go` descends every exported field of every value, knowing nothing
+about node kinds; the generated walker must agree with it node for node across the test corpus.
+Deleting one traversal line from `walk.go` makes that test fail and names the node it stopped
+at. The oracle is ~170x slower, which is the reason it stays in the test and the generated code
+ships.
 
 ## License
 
