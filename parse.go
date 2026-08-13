@@ -2,10 +2,16 @@ package jsast
 
 import (
 	"github.com/bytevet/esbuild-jsast/internal/config"
+	"github.com/bytevet/esbuild-jsast/internal/helpers"
 	"github.com/bytevet/esbuild-jsast/internal/js_ast"
 	"github.com/bytevet/esbuild-jsast/internal/js_parser"
 	"github.com/bytevet/esbuild-jsast/internal/logger"
 )
+
+// UTF16ToString converts an EString.Value / ETemplate cooked part to a Go
+// string. Required, not a convenience: esbuild stores string literals as
+// []uint16 because JS strings are UTF-16.
+func UTF16ToString(text []uint16) string { return helpers.UTF16ToString(text) }
 
 // Options is the entire configuration surface this package exposes, and it is
 // two booleans on purpose.
