@@ -1,0 +1,125 @@
+name: Upstream
+
+# Watches esbuild for a newer tag and opens the bump as a pull request.
+#
+# esbuild ships roughly monthly, so weekly is frequent enough never to be more
+# than a few days stale, and rare enough that a quiet week costs nothing.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: open a bump PR if esbuild moved
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Tags, not the releases API: no token, no rate limit, and no assumption
+      # that upstream publishes GitHub Releases rather than plain tags. sort -V
+      # is what orders v0.28.9 before v0.28.10 correctly.
+      - id: check
+        name: is there a newer esbuild?
+        run: |
+          set -eu
+          latest=$(git ls-remote --tags --refs https://github.com/evanw/esbuild.git 'v*' \
+            | awk -F/ '{print $NF}' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
+          current=$(sed -n 's/^version=//p' ESBUILD_VERSION)
+          echo "latest=$latest"               >>"$GITHUB_OUTPUT"
+          echo "current=$current"             >>"$GITHUB_OUTPUT"
+          echo "branch=bump/esbuild-$latest"  >>"$GITHUB_OUTPUT"
+
+          if [ "$latest" = "$current" ]; then
+            echo "needed=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::already on $current"
+          elif git ls-remote --exit-code --heads origin "bump/esbuild-$latest" >/dev/null 2>&1; then
+            # Re-running must not reopen a bump that is already in review.
+            echo "needed=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::$latest already has a branch open"
+          else
+            echo "needed=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::$current -> $latest"
+          fi
+
+      - name: sync and verify
+        if: steps.check.outputs.needed == 'true'
+        id: sync
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+        run: |
+          set -eu
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          # Syncs, regenerates the seam and walker, then builds, vets and tests.
+          # A failure here fails the workflow on purpose: an upstream release
+          # this package cannot absorb should page a human, not open a broken PR.
+          tools/vendor-esbuild.sh --version "$LATEST"
+
+          # The gates CI would run. Repeated here because a PR opened with
+          # GITHUB_TOKEN does NOT trigger other workflows, so without this the
+          # bump would arrive with no checks at all.
+          go test -race ./...
+          tools/vendor-esbuild.sh --check
+
+          # The review signal: added names are new upstream surface, removed
+          # names are a breaking change for consumers of this package.
+          if git diff --quiet -- export.go constants.go walk.go; then
+            echo "surface=unchanged" >>"$GITHUB_OUTPUT"
+          else
+            echo "surface=changed" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: open the pull request
+        if: steps.check.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          SURFACE: ${{ steps.sync.outputs.surface }}
+        run: |
+          set -eu
+          git commit -qam "Sync esbuild to $LATEST"
+          git push -q -u origin "$BRANCH"
+
+          if [ "$SURFACE" = changed ]; then
+            note="**The generated surface changed.** Read the diff to \`export.go\`, \`constants.go\` and \`walk.go\`: added names are new upstream surface, **removed names are a breaking change** for consumers of this package."
+          else
+            note="The generated seam and walker came out byte-identical, so no AST surface moved."
+          fi
+
+          printf '%s\n' \
+            "Vendored esbuild \`$CURRENT\` to \`$LATEST\`, produced by \`tools/vendor-esbuild.sh --version $LATEST\`." \
+            "" \
+            "$note" \
+            "" \
+            "Every file under \`internal/\` is upstream's file for this tag, byte for byte apart from the import prefix, so the vendored diff here **is** upstream's diff." \
+            "" \
+            "- Upstream changes: https://github.com/evanw/esbuild/compare/$CURRENT...$LATEST" \
+            "- Changelog: https://github.com/evanw/esbuild/blob/$LATEST/CHANGELOG.md" \
+            "" \
+            "Verified in the job that opened this: regeneration, \`go build\`, \`go vet\`, \`go test -race\` and \`vendor-esbuild.sh --check\`." \
+            "" \
+            "> [!NOTE]" \
+            "> A pull request opened with \`GITHUB_TOKEN\` does not trigger other workflows, so the CI checks will not run here on their own -- the gates above ran inside the bump job instead. Push an empty commit to trigger them, or swap the token for a PAT in \`.github/workflows/upstream.yml\` to have CI run automatically." \
+            >pr-body.md
+
+          gh pr create --title "Sync esbuild to $LATEST" --body-file pr-body.md
+          rm -f pr-body.md

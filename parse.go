@@ -1,11 +1,19 @@
 package jsast
 
 import (
+	"strings"
+
 	"github.com/bytevet/esbuild-jsast/internal/config"
+	"github.com/bytevet/esbuild-jsast/internal/helpers"
 	"github.com/bytevet/esbuild-jsast/internal/js_ast"
 	"github.com/bytevet/esbuild-jsast/internal/js_parser"
 	"github.com/bytevet/esbuild-jsast/internal/logger"
 )
+
+// UTF16ToString converts an EString.Value / ETemplate cooked part to a Go
+// string. Required, not a convenience: esbuild stores string literals as
+// []uint16 because JS strings are UTF-16.
+func UTF16ToString(text []uint16) string { return helpers.UTF16ToString(text) }
 
 // Options is the entire configuration surface this package exposes, and it is
 // two booleans on purpose.
@@ -21,6 +29,31 @@ import (
 type Options struct {
 	TS  bool // parse TypeScript syntax
 	JSX bool // parse JSX with the classic React.createElement pragma
+
+	// ExperimentalDecorators enables TypeScript's legacy decorators. Requires
+	// TS; it is ignored otherwise.
+	//
+	// Without it a decorator on a PARAMETER is a parse error -- "Parameter
+	// decorators only work when experimental decorators are enabled" -- which
+	// rejects the entire file, so NestJS and Angular sources do not parse at
+	// all. Decorators on classes, methods and properties parse without it.
+	//
+	// This is the one knob here that changes what the tree SAYS, so it is
+	// opt-in and off by default. js_parser has no parse-and-discard path:
+	// accepting the syntax and lowering it are gated on the same flag
+	// (js_parser.go, decoratorInFnArgs; js_parser_lower_class.go,
+	// propExperimentalDecorators). Setting it therefore lowers EVERY
+	// TypeScript experimental decorator in the file, not only the parameter
+	// ones -- Class.Decorators and Property.Decorators come back empty, and
+	// the decorators reappear as __decorateClass / __decorateParam calls
+	// emitted after the class.
+	//
+	// So a file parsed with this on is NOT the source as written, and a caller
+	// that reads decorators loses them. Prefer parsing with it off and
+	// retrying only on the error above: that keeps as-written trees for every
+	// file that does not need it, and confines the lowered shape to files that
+	// would otherwise not parse at all.
+	ExperimentalDecorators bool
 }
 
 // File is one parsed source file.
@@ -45,6 +78,10 @@ func (f *File) NameOf(r Ref) string {
 	return f.symbols[r.InnerIndex].OriginalName
 }
 
+// Inspect walks every node in the file in depth-first order. See Inspect for
+// the traversal's contract.
+func (f *File) Inspect(fn func(Node) bool) { Inspect(f.Stmts, fn) }
+
 // Error is a parse diagnostic. Line is 1-based; Column is a 0-based BYTE offset
 // within the line, matching esbuild's own convention.
 type Error struct {
@@ -64,6 +101,9 @@ func Parse(contents string, opts Options) (*File, []Error) {
 	co := config.Options{}
 	if opts.TS {
 		co.TS = config.TSOptions{Parse: true}
+		if opts.ExperimentalDecorators {
+			co.TS.Config.ExperimentalDecorators = config.True
+		}
 	}
 	if opts.JSX {
 		co.JSX = config.JSXOptions{Parse: true}
@@ -87,6 +127,38 @@ func Parse(contents string, opts Options) (*File, []Error) {
 		f.Imports = append(f.Imports, r.Path.Text)
 	}
 	return f, nil
+}
+
+// IsExperimentalDecoratorError reports whether errs contains the one diagnostic
+// that Options.ExperimentalDecorators fixes -- a decorator on a parameter --
+// and therefore whether re-parsing with the flag on is worth trying:
+//
+//	f, errs := jsast.Parse(src, jsast.Options{TS: true})
+//	if jsast.IsExperimentalDecoratorError(errs) {
+//		f, errs = jsast.Parse(src, jsast.Options{TS: true, ExperimentalDecorators: true})
+//	}
+//
+// This lives here rather than in each caller because the diagnostic carries no
+// MsgID upstream, so the only way to recognise it is by message text. Keeping
+// that match in one place behind a test means an upstream reword breaks a test
+// in this package when the tree is re-vendored, instead of silently disabling
+// the retry everywhere downstream.
+//
+// The match is deliberately narrow. Four other upstream diagnostics mention
+// experimental decorators -- "can only be used with class declarations",
+// "cannot be used in expression position", "cannot be used on private
+// identifiers" -- and every one of them fires only when the flag is ALREADY
+// on, so retrying on those buys an identical second failure. "Parameter
+// decorators are not allowed in JavaScript" is excluded too: that one wants
+// Options.TS, which this flag does not imply.
+func IsExperimentalDecoratorError(errs []Error) bool {
+	for _, e := range errs {
+		if strings.Contains(e.Text, "Parameter decorators") &&
+			strings.Contains(e.Text, "experimental decorators") {
+			return true
+		}
+	}
+	return false
 }
 
 // collectErrors keeps only errors. esbuild warns ("duplicate key", "unused

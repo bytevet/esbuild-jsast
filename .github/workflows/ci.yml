@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.25.x is the floor declared in go.mod -- the minimum a consumer
+        # needs. stable is what upstream esbuild is actually developed against.
+        # Both must pass, or the floor is a fiction.
+        go: ['1.25.x', 'stable']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+
+      # The vendored tree is upstream's source, which is already gofmt-clean,
+      # so this covers the whole repository rather than excluding internal/.
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "::error::gofmt needed for:"
+            echo "$files"
+            exit 1
+          fi
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  generated:
+    name: generated files are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # export.go, constants.go and walk.go are functions of internal/. A stale
+      # one still COMPILES -- an upstream release that adds a node kind or a
+      # constant leaves the build green while the new surface silently goes
+      # missing. This is the only check that catches that.
+      - run: go generate ./...
+      - name: no diff after regeneration
+        run: |
+          if ! git diff --exit-code -- export.go constants.go walk.go; then
+            echo "::error::generated files are stale or hand-edited; run: go generate ./..."
+            exit 1
+          fi
+
+  vendored:
+    name: internal/ matches the pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Separate job because this one clones esbuild from GitHub: when it fails
+      # you want to see immediately whether the tree drifted or the network
+      # did, not have it mixed into a code failure.
+      #
+      # Proves every file under internal/ is upstream's file for the pinned tag,
+      # byte for byte apart from the import prefix -- so "vendored copy" cannot
+      # quietly become "fork nobody can audit". Also fails if the tag itself was
+      # repointed upstream.
+      - name: vendor-esbuild --check
+        run: tools/vendor-esbuild.sh --check
