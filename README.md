@@ -126,6 +126,16 @@ release that adds a node kind or a constant would otherwise leave CI green while
 silently went missing. `vendored` is a separate job because it clones esbuild over the network —
 when it fails you want to see at a glance whether the tree drifted or the network did.
 
+`.github/workflows/upstream.yml` runs weekly, and on a newer esbuild tag it syncs, verifies and
+opens the bump as a pull request whose body carries the upstream compare link and whether the
+generated surface moved. A sync that fails to build or test fails the workflow instead of
+opening the PR — an upstream release this package cannot absorb should reach a human, not land
+as a broken branch.
+
+One wrinkle worth knowing: a pull request opened with `GITHUB_TOKEN` does not trigger other
+workflows, so CI does not run on the bump PR by itself. The bump job therefore runs the same
+gates inline. Swap in a PAT if you would rather have the checks appear on the PR.
+
 The seam is *derived*, not listed, because a list is the wrong shape for a file whose contents
 are a function of `internal/`: an upstream release that **adds** a type or constant does not
 break the build, so a stale list stays green while quietly withholding the new surface. The rule
