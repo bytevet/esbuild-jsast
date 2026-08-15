@@ -1,6 +1,8 @@
 package jsast
 
 import (
+	"strings"
+
 	"github.com/bytevet/esbuild-jsast/internal/config"
 	"github.com/bytevet/esbuild-jsast/internal/helpers"
 	"github.com/bytevet/esbuild-jsast/internal/js_ast"
@@ -125,6 +127,38 @@ func Parse(contents string, opts Options) (*File, []Error) {
 		f.Imports = append(f.Imports, r.Path.Text)
 	}
 	return f, nil
+}
+
+// IsExperimentalDecoratorError reports whether errs contains the one diagnostic
+// that Options.ExperimentalDecorators fixes -- a decorator on a parameter --
+// and therefore whether re-parsing with the flag on is worth trying:
+//
+//	f, errs := jsast.Parse(src, jsast.Options{TS: true})
+//	if jsast.IsExperimentalDecoratorError(errs) {
+//		f, errs = jsast.Parse(src, jsast.Options{TS: true, ExperimentalDecorators: true})
+//	}
+//
+// This lives here rather than in each caller because the diagnostic carries no
+// MsgID upstream, so the only way to recognise it is by message text. Keeping
+// that match in one place behind a test means an upstream reword breaks a test
+// in this package when the tree is re-vendored, instead of silently disabling
+// the retry everywhere downstream.
+//
+// The match is deliberately narrow. Four other upstream diagnostics mention
+// experimental decorators -- "can only be used with class declarations",
+// "cannot be used in expression position", "cannot be used on private
+// identifiers" -- and every one of them fires only when the flag is ALREADY
+// on, so retrying on those buys an identical second failure. "Parameter
+// decorators are not allowed in JavaScript" is excluded too: that one wants
+// Options.TS, which this flag does not imply.
+func IsExperimentalDecoratorError(errs []Error) bool {
+	for _, e := range errs {
+		if strings.Contains(e.Text, "Parameter decorators") &&
+			strings.Contains(e.Text, "experimental decorators") {
+			return true
+		}
+	}
+	return false
 }
 
 // collectErrors keeps only errors. esbuild warns ("duplicate key", "unused

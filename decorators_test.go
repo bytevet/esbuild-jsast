@@ -96,6 +96,73 @@ func TestExperimentalDecoratorsLowersTheTree(t *testing.T) {
 	}
 }
 
+// TestIsExperimentalDecoratorError pins the retry predicate against real parser
+// output, in both directions. The false cases matter as much as the true one:
+// most diagnostics mentioning experimental decorators fire only when the flag
+// is already on, so matching them would buy a second identical failure.
+func TestIsExperimentalDecoratorError(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		opts Options
+		want bool
+	}{
+		{"parameter_decorator", srcParamDecorator, Options{TS: true}, true},
+		{"constructor_parameter", srcCtorParamDecorator, Options{TS: true}, true},
+		{"clean_parse", srcClassDecorators, Options{TS: true}, false},
+		{"ordinary_syntax_error", "function f( { 1 = ;", Options{TS: true}, false},
+
+		// Already-on failures: retrying cannot help, so these must not match.
+		{"expression_position", `const x = (@dec class {});`,
+			Options{TS: true, ExperimentalDecorators: true}, false},
+		{"private_identifier", `class C { @dec #x = 1 }`,
+			Options{TS: true, ExperimentalDecorators: true}, false},
+		{"decorator_not_valid_here", `@dec const y = 1;`, Options{TS: true}, false},
+
+		// Wants Options.TS, which ExperimentalDecorators does not imply.
+		{"parameter_decorator_in_js", `class C { m(@dec a) {} }`, Options{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, errs := Parse(c.src, c.opts)
+			if got := IsExperimentalDecoratorError(errs); got != c.want {
+				t.Errorf("IsExperimentalDecoratorError = %v, want %v (errs: %v)", got, c.want, errs)
+			}
+		})
+	}
+}
+
+// TestRetryPatternRecoversTheFile exercises the documented flow end to end: the
+// predicate is only useful if acting on it actually yields a parsed file.
+func TestRetryPatternRecoversTheFile(t *testing.T) {
+	f, errs := Parse(srcParamDecorator, Options{TS: true})
+	if !IsExperimentalDecoratorError(errs) {
+		t.Fatalf("expected the retryable diagnostic, got %v", errs)
+	}
+	f, errs = Parse(srcParamDecorator, Options{TS: true, ExperimentalDecorators: true})
+	if len(errs) > 0 {
+		t.Fatalf("retry failed: %v", errs)
+	}
+	if len(f.Stmts) == 0 {
+		t.Fatal("retry produced no statements")
+	}
+}
+
+// TestFlagOnCanBreakFilesThatParse is why the retry is conditional rather than
+// a global switch. These two shapes parse with the flag OFF and fail with it
+// ON, so flipping it for every file trades one set of parse failures for
+// another -- on top of losing decorator nodes everywhere.
+func TestFlagOnCanBreakFilesThatParse(t *testing.T) {
+	for _, src := range []string{`const x = (@dec class {});`, `class C { @dec #x = 1 }`} {
+		if _, errs := Parse(src, Options{TS: true}); len(errs) > 0 {
+			t.Errorf("flag off: %q should parse, got %v", src, errs)
+		}
+		if _, errs := Parse(src, Options{TS: true, ExperimentalDecorators: true}); len(errs) == 0 {
+			t.Errorf("flag on: %q should fail, but parsed", src)
+		}
+	}
+}
+
 type shape struct {
 	classDecorators, propDecorators, runtimeCalls int
 }

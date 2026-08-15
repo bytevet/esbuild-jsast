@@ -68,13 +68,20 @@ parameter ones:
 | `ExperimentalDecorators: true`  | 0 | 0 | 3 |
 
 Decorators stop appearing as `Class.Decorators` / `Property.Decorators` and come back as
-`__decorateClass` / `__decorateParam` calls after the class. So don't switch it on globally —
-parse with it off and retry only on the error, which keeps as-written trees everywhere except
-the files that would otherwise not parse at all:
+`__decorateClass` / `__decorateParam` calls after the class.
+
+Worse, the flag is not a superset: `(@dec class {})` and `class C { @dec #x = 1 }` **parse
+with it off and fail with it on**. Switching it on globally trades one set of parse failures
+for another, on top of losing decorator nodes everywhere.
+
+So parse with it off and retry only when it would help. `IsExperimentalDecoratorError` is the
+predicate for that — the diagnostic carries no message ID upstream, so it has to be matched by
+text, and keeping that match here behind a test means an upstream reword breaks a test at
+re-vendoring time rather than silently disabling the retry in your code:
 
 ```go
 f, errs := jsast.Parse(src, jsast.Options{TS: true})
-if len(errs) > 0 && strings.Contains(errs[0].Text, "experimental decorators") {
+if jsast.IsExperimentalDecoratorError(errs) {
     f, errs = jsast.Parse(src, jsast.Options{TS: true, ExperimentalDecorators: true})
 }
 ```
