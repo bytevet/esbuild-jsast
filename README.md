@@ -113,6 +113,19 @@ Three things to read after a sync, in order of how quietly they fail:
 there — `Options`, `Parse`, `IsExperimentalDecoratorError` — survives a sync. It is the tests
 that tell you whether it still *works*, which is why the script runs them.
 
+CI (`.github/workflows/ci.yml`) enforces all of this on every push and pull request:
+
+| job | gate |
+| --- | --- |
+| `test` | gofmt, build, vet, `go test -race` — on Go 1.25.x (the floor in `go.mod`) and stable |
+| `generated` | `go generate` must produce no diff |
+| `vendored` | `tools/vendor-esbuild.sh --check` |
+
+`generated` is the one that earns its keep: a stale `export.go` still *compiles*, so an upstream
+release that adds a node kind or a constant would otherwise leave CI green while the new surface
+silently went missing. `vendored` is a separate job because it clones esbuild over the network —
+when it fails you want to see at a glance whether the tree drifted or the network did.
+
 The seam is *derived*, not listed, because a list is the wrong shape for a file whose contents
 are a function of `internal/`: an upstream release that **adds** a type or constant does not
 break the build, so a stale list stays green while quietly withholding the new surface. The rule
