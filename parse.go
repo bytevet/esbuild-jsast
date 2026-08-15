@@ -27,6 +27,31 @@ func UTF16ToString(text []uint16) string { return helpers.UTF16ToString(text) }
 type Options struct {
 	TS  bool // parse TypeScript syntax
 	JSX bool // parse JSX with the classic React.createElement pragma
+
+	// ExperimentalDecorators enables TypeScript's legacy decorators. Requires
+	// TS; it is ignored otherwise.
+	//
+	// Without it a decorator on a PARAMETER is a parse error -- "Parameter
+	// decorators only work when experimental decorators are enabled" -- which
+	// rejects the entire file, so NestJS and Angular sources do not parse at
+	// all. Decorators on classes, methods and properties parse without it.
+	//
+	// This is the one knob here that changes what the tree SAYS, so it is
+	// opt-in and off by default. js_parser has no parse-and-discard path:
+	// accepting the syntax and lowering it are gated on the same flag
+	// (js_parser.go, decoratorInFnArgs; js_parser_lower_class.go,
+	// propExperimentalDecorators). Setting it therefore lowers EVERY
+	// TypeScript experimental decorator in the file, not only the parameter
+	// ones -- Class.Decorators and Property.Decorators come back empty, and
+	// the decorators reappear as __decorateClass / __decorateParam calls
+	// emitted after the class.
+	//
+	// So a file parsed with this on is NOT the source as written, and a caller
+	// that reads decorators loses them. Prefer parsing with it off and
+	// retrying only on the error above: that keeps as-written trees for every
+	// file that does not need it, and confines the lowered shape to files that
+	// would otherwise not parse at all.
+	ExperimentalDecorators bool
 }
 
 // File is one parsed source file.
@@ -74,6 +99,9 @@ func Parse(contents string, opts Options) (*File, []Error) {
 	co := config.Options{}
 	if opts.TS {
 		co.TS = config.TSOptions{Parse: true}
+		if opts.ExperimentalDecorators {
+			co.TS.Config.ExperimentalDecorators = config.True
+		}
 	}
 	if opts.JSX {
 		co.JSX = config.JSXOptions{Parse: true}
